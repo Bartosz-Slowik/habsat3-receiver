@@ -4,11 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-spidev.workspace = true
 hex = "0.4.3"
 serialport = { version = "4.8.1", default-features = false }
 memchr = "2.8.0"
 
-lora = { path = "../../platform/lora/" }
 common = { path = "../common" }
 

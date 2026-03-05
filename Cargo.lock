@@ -732,10 +732,8 @@ version = "0.1.0"
 dependencies = [
  "common",
  "hex",
- "lora",
  "memchr",
  "serialport",
- "spidev",
 ]
 
 [[package]]

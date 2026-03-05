@@ -4,24 +4,24 @@ use std::io::Write;
 use std::{error::Error, time::Duration};
 
 use common::RadioMsg;
-use serialport::TTYPort;
+use serialport::SerialPort;
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let key = std::env::var("LORA_ENCRYPTION_KEY")
-        .expect("LORA_ENCRYPTION_KEY envirnoment variable must set to a 32-byte long string");
+    // Hardcoded key for testing (use LORA_ENCRYPTION_KEY env in production)
+    let key: [u8; 32] = [0u8; 32];
 
-    let key: [u8; 32] = key
-        .as_bytes()
-        .try_into()
-        .expect("Key must be exactly 32 bytes long");
-
-    let ports = serialport::available_ports().expect("No ports found!");
-    let port = ports.first().unwrap();
+    let ports = serialport::available_ports().expect("Failed to list serial ports");
+    let port = ports.first().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "No serial ports found. Plug in a LoRa serial device (e.g. USB-UART).",
+        )
+    })?;
 
     println!("Opening {}", port.port_name);
     let port = serialport::new(&port.port_name, 9600)
         .timeout(Duration::from_secs(1))
-        .open_native()
+        .open()
         .unwrap();
 
     let mut tty = TtyAdapter::new(port);
@@ -83,15 +83,15 @@ fn parse_data(s: &str) -> Result<Vec<u8>, Box<dyn Error>> {
 }
 
 struct TtyAdapter {
-    tty: TTYPort,
+    port: Box<dyn SerialPort>,
     len: usize,
     buf: [u8; 1000],
 }
 
 impl TtyAdapter {
-    pub fn new(tty: TTYPort) -> Self {
+    pub fn new(port: Box<dyn SerialPort>) -> Self {
         Self {
-            tty,
+            port,
             len: 0,
             buf: [0u8; 1000],
         }
@@ -110,7 +110,7 @@ impl TtyAdapter {
 
             Ok(Some(line))
         } else {
-            let new_bytes_count = self.tty.read(&mut self.buf[self.len..])?;
+            let new_bytes_count = self.port.read(&mut self.buf[self.len..])?;
 
             self.len += new_bytes_count;
             Ok(None)
@@ -134,7 +134,7 @@ impl TtyAdapter {
 
     pub fn write(&mut self, command: &str) -> io::Result<()> {
         println!("Writing: {command}");
-        self.tty.write_all(command.as_bytes())?;
+        self.port.write_all(command.as_bytes())?;
         Ok(())
     }
 }
