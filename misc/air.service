@@ -1,0 +1,12 @@
+[Unit]
+Description=Air service
+
+[Service]
+Type=simple
+ExecStart=%h/air
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
+

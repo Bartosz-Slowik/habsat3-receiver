@@ -14,6 +14,10 @@ build-debug:
     target/aarch64-unknown-linux-gnu/debug/lora-listener \
     habsat@habsat.lan:~
 
+  ssh habsat@habsat.lan 'mkdir --parents ~/.config/systemd/user'
+  scp misc/air.service \
+    habsat@habsat.lan:~/.config/systemd/user/
+
 build-release:
   cargo build --release --target aarch64-unknown-linux-gnu
   cargo build --release -p lora-listener --target x86_64-unknown-linux-gnu
@@ -28,6 +32,10 @@ build-release:
     target/aarch64-unknown-linux-gnu/release/air \
     target/aarch64-unknown-linux-gnu/release/bno-calibrate \
     habsat@habsat.lan:~
+
+  ssh habsat@habsat.lan 'mkdir --parents ~/.config/systemd/user'
+  scp misc/air.service \
+    habsat@habsat.lan:~/.config/systemd/user/
 
 
 mock-db-setup:
