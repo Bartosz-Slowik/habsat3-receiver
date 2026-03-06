@@ -82,10 +82,9 @@ fn run_serial_loop(key: [u8; 32], baud_rate: u32, sender: Option<std::sync::mpsc
                 Err(e) => println!("Failed to parse data: {e}"),
                 Ok(raw) => {
                     if let Some((timestamp, msg)) = RadioMsg::decrypt(&raw, &key) {
+                        on_message(timestamp, &msg);
                         if let Some(ref s) = sender {
                             let _ = s.send((timestamp, msg));
-                        } else {
-                            on_message(timestamp, &msg);
                         }
                     }
                 }
@@ -146,7 +145,7 @@ fn configure_lora(tty: &mut TtyAdapter) {
     tty.write("AT+MODE=TEST\r\n").unwrap();
     println!("{}", tty.read_line().unwrap().trim_end());
 
-    let frequency = 868;
+    let frequency = 869.5;
     let spreading_factor = 11;
     let bandwidth = 250;
     let tx_preamble = 8;
@@ -359,6 +358,11 @@ impl eframe::App for LoraGuiApp {
                     ui.label(format!("Speed: {:.2} m/s", msg.speed_over_ground_meters_per_second));
                     ui.label(format!("Alt: {:.1} m", msg.altitude_meters));
                     ui.label(format!("Sats: {}", msg.satellites));
+                    let dt = chrono::DateTime::from_timestamp(*ts as i64, (ts.fract() * 1e9) as u32)
+                        .map(|utc| utc.with_timezone(&chrono::Local));
+                    if let Some(dt) = dt {
+                        ui.label(format!("Time: {}", dt.format("%H:%M:%S")));
+                    }
                     ui.label(format!("Msgs: {}", self.messages.len()));
                 });
             } else {

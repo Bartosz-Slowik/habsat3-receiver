@@ -13,6 +13,7 @@ serialport = { version = "4.8.1", default-features = false }
 memchr = "2.8.0"
 common = { path = "../common" }
 
+chrono = "0.4"
 eframe = { version = "0.29", optional = true }
 egui_plot = { version = "0.29", optional = true }
 walkers = { version = "0.29", optional = true }

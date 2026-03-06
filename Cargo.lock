@@ -2488,6 +2488,7 @@ dependencies = [
 name = "lora-listener"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "common",
  "eframe",
  "egui_plot",
