@@ -13,7 +13,12 @@ const MAX_GUI_MESSAGES: usize = 2000;
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().collect();
     let mock = args.iter().any(|a| a == "--mock" || a == "-m");
-    let key: [u8; 32] = [0u8; 32];
+    let baud_rate: u32 = args
+        .windows(2)
+        .find(|w| w[0] == "--baud" || w[0] == "-b")
+        .map(|w| w[1].parse().expect("--baud must be a valid number"))
+        .unwrap_or(9600);
+    let key: [u8; 32] = *b"sPvC4rYYCy6QlZxNHaB5lHjsVgz6F2NJ";
 
     #[cfg(feature = "gui")]
     let use_gui = args.iter().any(|a| a == "--gui" || a == "-g");
@@ -27,14 +32,14 @@ fn main() -> Result<(), Box<dyn Error>> {
             thread::spawn(move || run_mock_stream(Some(tx)))
         } else {
             println!("GUI: opening serial and receiving in background.");
-            thread::spawn(move || run_serial_loop(key_for_serial, Some(tx)))
+            thread::spawn(move || run_serial_loop(key_for_serial, baud_rate, Some(tx)))
         };
         let native_options = eframe::NativeOptions::default();
         let rx = std::sync::Mutex::new(rx);
         eframe::run_native(
             "LoRa listener",
             native_options,
-            Box::new(move |_cc| Ok(Box::new(LoraGuiApp::new(rx)))),
+            Box::new(move |cc| Ok(Box::new(LoraGuiApp::new(rx, cc.egui_ctx.clone())))),
         )
         .map_err(|e| format!("eframe run_native: {}", e))?;
         drop(thread_handle);
@@ -47,19 +52,20 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
-    run_serial_loop(key, None);
+    run_serial_loop(key, baud_rate, None);
     Ok(())
 }
 
 /// Serial receive loop. When `sender` is Some, pushes (timestamp, msg) to the channel; otherwise prints via on_message.
-fn run_serial_loop(key: [u8; 32], sender: Option<std::sync::mpsc::Sender<(f64, RadioMsg)>>) {
+fn run_serial_loop(key: [u8; 32], baud_rate: u32, sender: Option<std::sync::mpsc::Sender<(f64, RadioMsg)>>) {
     let ports = serialport::available_ports().expect("Failed to list serial ports");
     let port = ports.first().expect(
         "No serial ports found. Plug in a LoRa serial device (e.g. USB-UART). Use --mock for testing without hardware.",
     );
 
     println!("Opening {}", port.port_name);
-    let port = serialport::new(&port.port_name, 9600)
+    println!("Baud rate: {baud_rate}");
+    let port = serialport::new(&port.port_name, baud_rate)
         .timeout(Duration::from_secs(1))
         .open()
         .unwrap();
@@ -239,16 +245,97 @@ use eframe::egui;
 struct LoraGuiApp {
     rx: std::sync::Mutex<std::sync::mpsc::Receiver<(f64, RadioMsg)>>,
     messages: Vec<(f64, RadioMsg)>,
+    tiles: walkers::HttpTiles,
+    map_memory: walkers::MapMemory,
 }
 
 #[cfg(feature = "gui")]
 impl LoraGuiApp {
-    fn new(rx: std::sync::Mutex<std::sync::mpsc::Receiver<(f64, RadioMsg)>>) -> Self {
+    fn new(
+        rx: std::sync::Mutex<std::sync::mpsc::Receiver<(f64, RadioMsg)>>,
+        egui_ctx: egui::Context,
+    ) -> Self {
         Self {
             rx,
             messages: Vec::new(),
+            tiles: walkers::HttpTiles::new(walkers::sources::OpenStreetMap, egui_ctx),
+            map_memory: walkers::MapMemory::default(),
         }
     }
+}
+
+/// Draws the GPS path (line) and current position (dot) on the walkers map.
+#[cfg(feature = "gui")]
+struct GpsMarkerPlugin {
+    path: Vec<(f64, f64)>,
+    latest: Option<(f64, f64)>,
+}
+
+#[cfg(feature = "gui")]
+impl walkers::Plugin for GpsMarkerPlugin {
+    fn run(
+        self: Box<Self>,
+        ui: &mut egui::Ui,
+        _response: &egui::Response,
+        projector: &walkers::Projector,
+    ) {
+        let path_color = egui::Color32::from_rgb(80, 160, 240);
+        let dot_color = egui::Color32::from_rgb(220, 60, 60);
+        for (lon, lat) in &self.path {
+            let pos = walkers::Position::from_lon_lat(*lon, *lat);
+            let screen = projector.project(pos);
+            ui.painter().circle_filled(egui::Pos2::new(screen.x, screen.y), 2.5, path_color);
+        }
+        if let Some((lon, lat)) = self.latest {
+            let pos = walkers::Position::from_lon_lat(lon, lat);
+            let screen = projector.project(pos);
+            ui.painter().circle_filled(egui::Pos2::new(screen.x, screen.y), 10.0, dot_color);
+        }
+    }
+}
+
+#[cfg(feature = "gui")]
+fn tile_plot(
+    ui: &mut egui::Ui,
+    title: &str,
+    side: f32,
+    x: &[f64],
+    y: Vec<f64>,
+    color: egui::Color32,
+) {
+    ui.vertical(|ui| {
+        ui.set_max_width(side);
+        ui.label(egui::RichText::new(title).strong());
+        if x.len() != y.len() || x.is_empty() {
+            ui.add_space(side - ui.text_style_height(&egui::TextStyle::Body));
+            ui.label("—");
+            return;
+        }
+        let points: Vec<[f64; 2]> = x.iter().copied().zip(y).map(|(a, b)| [a, b]).collect();
+        let x_min = x.iter().copied().fold(f64::NAN, f64::min);
+        let x_max = x.iter().copied().fold(f64::NAN, f64::max);
+        let y_min = points.iter().map(|p| p[1]).fold(f64::NAN, f64::min);
+        let y_max = points.iter().map(|p| p[1]).fold(f64::NAN, f64::max);
+        let x_range = (x_max - x_min).abs();
+        let y_range = (y_max - y_min).abs();
+        let x_margin = if x_range > 1e-9 { x_range * 0.08 } else { 0.5 };
+        let y_margin = if y_range > 1e-9 { y_range * 0.08 } else { 0.5 };
+        let plot = egui_plot::Plot::new(egui::Id::new(title))
+            .height(side)
+            .label_formatter(move |_name, value| format!("{:.3}", value.y))
+            .include_x(x_min - x_margin)
+            .include_x(x_max + x_margin)
+            .include_y(y_min - y_margin)
+            .include_y(y_max + y_margin)
+            .show_axes([true, true]);
+        plot.show(ui, |plot_ui| {
+            plot_ui.line(
+                egui_plot::Line::new(egui_plot::PlotPoints::new(points))
+                    .color(color)
+                    .width(2.0),
+            );
+        });
+    });
 }
 
 #[cfg(feature = "gui")]
@@ -263,8 +350,7 @@ impl eframe::App for LoraGuiApp {
         }
         drop(rx);
 
-        egui::TopBottomPanel::top("telemetry").show(ctx, |ui| {
-            ui.heading("LoRa receiver");
+        egui::TopBottomPanel::bottom("telemetry").show(ctx, |ui| {
             if let Some((ts, msg)) = self.messages.last() {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(format!("Lat: {:.6}°", msg.latitude_degrees));
@@ -273,43 +359,77 @@ impl eframe::App for LoraGuiApp {
                     ui.label(format!("Speed: {:.2} m/s", msg.speed_over_ground_meters_per_second));
                     ui.label(format!("Alt: {:.1} m", msg.altitude_meters));
                     ui.label(format!("Sats: {}", msg.satellites));
-                    ui.label(format!("Time: {:.1}", ts));
+                    ui.label(format!("Msgs: {}", self.messages.len()));
                 });
             } else {
                 ui.label("Waiting for first message…");
             }
-            ui.label(format!("Messages: {}", self.messages.len()));
         });
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            if self.messages.is_empty() {
-                ui.label("No track data yet.");
-                return;
-            }
+        let ts: Vec<f64> = self.messages.iter().map(|(t, _)| *t).collect();
 
-            let points: Vec<[f64; 2]> = self
+        egui::SidePanel::right("graphs")
+            .resizable(true)
+            .default_width(220.0)
+            .show(ctx, |ui| {
+                let side = ui.available_width();
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    tile_plot(
+                        ui,
+                        "Course (°)",
+                        side,
+                        &ts,
+                        self.messages.iter().map(|(_, m)| m.course_over_ground_degrees).collect::<Vec<_>>(),
+                        egui::Color32::from_rgb(220, 160, 80),
+                    );
+                    tile_plot(
+                        ui,
+                        "Speed (m/s)",
+                        side,
+                        &ts,
+                        self.messages.iter().map(|(_, m)| m.speed_over_ground_meters_per_second).collect::<Vec<_>>(),
+                        egui::Color32::from_rgb(200, 100, 140),
+                    );
+                    tile_plot(
+                        ui,
+                        "Altitude (m)",
+                        side,
+                        &ts,
+                        self.messages.iter().map(|(_, m)| m.altitude_meters).collect::<Vec<_>>(),
+                        egui::Color32::from_rgb(140, 100, 200),
+                    );
+                    tile_plot(
+                        ui,
+                        "Satellites",
+                        side,
+                        &ts,
+                        self.messages.iter().map(|(_, m)| m.satellites as f64).collect::<Vec<_>>(),
+                        egui::Color32::from_rgb(100, 200, 200),
+                    );
+                });
+            });
+
+        egui::CentralPanel::default().show(ctx, |ui| {
+            let path: Vec<(f64, f64)> = self
                 .messages
                 .iter()
-                .map(|(_, m)| [m.longitude_degrees, m.latitude_degrees])
+                .map(|(_, m)| (m.longitude_degrees, m.latitude_degrees))
                 .collect();
-
-            let plot = egui_plot::Plot::new("track")
-                .view_aspect(1.0)
-                .label_formatter(|_name, value| {
-                    format!("Lon: {:.4}° Lat: {:.4}°", value.x, value.y)
-                })
-                .include_x(points.iter().map(|p| p[0]).min_by(f64::total_cmp).unwrap_or(0.0) - 0.001)
-                .include_x(points.iter().map(|p| p[0]).max_by(f64::total_cmp).unwrap_or(0.0) + 0.001)
-                .include_y(points.iter().map(|p| p[1]).min_by(f64::total_cmp).unwrap_or(0.0) - 0.001)
-                .include_y(points.iter().map(|p| p[1]).max_by(f64::total_cmp).unwrap_or(0.0) + 0.001);
-
-            plot.show(ui, |plot_ui| {
-                plot_ui.points(
-                    egui_plot::Points::new(points)
-                        .radius(2.0)
-                        .color(egui::Color32::from_rgb(80, 180, 240)),
-                );
-            });
+            let latest = self.messages.last().map(|(_, m)| (m.longitude_degrees, m.latitude_degrees));
+            let (center_lon, center_lat) = latest.unwrap_or((21.0122, 52.2297));
+            let plugin = GpsMarkerPlugin {
+                path,
+                latest,
+            };
+            ui.add_sized(
+                ui.available_size(),
+                walkers::Map::new(
+                    Some(&mut self.tiles),
+                    &mut self.map_memory,
+                    walkers::Position::from_lon_lat(center_lon, center_lat),
+                )
+                .with_plugin(plugin),
+            );
         });
 
         ctx.request_repaint();
