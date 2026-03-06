@@ -2,7 +2,14 @@ use chacha20poly1305::{ChaCha20Poly1305, KeyInit as _, Nonce, aead::Aead as _};
 use zerocopy::IntoBytes as _;
 
 #[derive(
-    zerocopy::IntoBytes, zerocopy::Immutable, zerocopy::FromBytes, Default, Debug, PartialEq,
+    zerocopy::IntoBytes,
+    zerocopy::Immutable,
+    zerocopy::FromBytes,
+    Default,
+    Debug,
+    PartialEq,
+    Clone,
+    Copy,
 )]
 pub struct RadioMsg {
     pub latitude_degrees: f64,

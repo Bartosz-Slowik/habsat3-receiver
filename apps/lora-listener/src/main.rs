@@ -7,23 +7,56 @@ use std::{error::Error, thread};
 use common::RadioMsg;
 use serialport::SerialPort;
 
+#[cfg(feature = "gui")]
+const MAX_GUI_MESSAGES: usize = 2000;
+
 fn main() -> Result<(), Box<dyn Error>> {
-    let mock = std::env::args().any(|a| a == "--mock" || a == "-m");
+    let args: Vec<String> = std::env::args().collect();
+    let mock = args.iter().any(|a| a == "--mock" || a == "-m");
     let key: [u8; 32] = [0u8; 32];
 
-    if mock {
-        println!("Mock mode: generating fake RadioMsg stream (no serial). Ctrl+C to stop.");
-        run_mock_stream();
+    #[cfg(feature = "gui")]
+    let use_gui = args.iter().any(|a| a == "--gui" || a == "-g");
+
+    #[cfg(feature = "gui")]
+    if use_gui {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let key_for_serial = key;
+        let thread_handle = if mock {
+            println!("Mock + GUI: generating fake stream in background.");
+            thread::spawn(move || run_mock_stream(Some(tx)))
+        } else {
+            println!("GUI: opening serial and receiving in background.");
+            thread::spawn(move || run_serial_loop(key_for_serial, Some(tx)))
+        };
+        let native_options = eframe::NativeOptions::default();
+        let rx = std::sync::Mutex::new(rx);
+        eframe::run_native(
+            "LoRa listener",
+            native_options,
+            Box::new(move |_cc| Ok(Box::new(LoraGuiApp::new(rx)))),
+        )
+        .map_err(|e| format!("eframe run_native: {}", e))?;
+        drop(thread_handle);
         return Ok(());
     }
 
+    if mock {
+        println!("Mock mode: generating fake RadioMsg stream (no serial). Ctrl+C to stop.");
+        run_mock_stream(None);
+        return Ok(());
+    }
+
+    run_serial_loop(key, None);
+    Ok(())
+}
+
+/// Serial receive loop. When `sender` is Some, pushes (timestamp, msg) to the channel; otherwise prints via on_message.
+fn run_serial_loop(key: [u8; 32], sender: Option<std::sync::mpsc::Sender<(f64, RadioMsg)>>) {
     let ports = serialport::available_ports().expect("Failed to list serial ports");
-    let port = ports.first().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "No serial ports found. Plug in a LoRa serial device (e.g. USB-UART). Use --mock for testing without hardware.",
-        )
-    })?;
+    let port = ports.first().expect(
+        "No serial ports found. Plug in a LoRa serial device (e.g. USB-UART). Use --mock for testing without hardware.",
+    );
 
     println!("Opening {}", port.port_name);
     let port = serialport::new(&port.port_name, 9600)
@@ -32,7 +65,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         .unwrap();
 
     let mut tty = TtyAdapter::new(port);
-
     configure_lora(&mut tty);
 
     loop {
@@ -42,25 +74,29 @@ fn main() -> Result<(), Box<dyn Error>> {
         if line.starts_with("+TEST: RX \"") {
             match parse_data(line.trim_end()) {
                 Err(e) => println!("Failed to parse data: {e}"),
-                Ok(msg) => {
-                    if let Some((timestamp, msg)) = RadioMsg::decrypt(&msg, &key) {
-                        on_message(timestamp, &msg);
+                Ok(raw) => {
+                    if let Some((timestamp, msg)) = RadioMsg::decrypt(&raw, &key) {
+                        if let Some(ref s) = sender {
+                            let _ = s.send((timestamp, msg));
+                        } else {
+                            on_message(timestamp, &msg);
+                        }
                     }
                 }
             }
-        };
+        }
     }
 }
 
-/// Called for each decoded (timestamp, RadioMsg). Override here or later for GUI.
+/// Called for each decoded (timestamp, RadioMsg) when not using GUI.
 fn on_message(timestamp: f64, msg: &RadioMsg) {
     println!("{timestamp}: {msg:?}");
 }
 
 /// Generates a fake stream of RadioMsg for testing without hardware.
-/// Simulates a moving track: start position drifts slightly each message.
-fn run_mock_stream() {
-    let mut lat = 52.2297;   // Warsaw
+/// When `sender` is Some, sends (timestamp, msg) to the channel; otherwise prints via on_message.
+fn run_mock_stream(sender: Option<std::sync::mpsc::Sender<(f64, RadioMsg)>>) {
+    let mut lat = 52.2297;
     let mut lon = 21.0122;
     let mut course = 45.0;
     let mut speed = 5.0;
@@ -83,9 +119,12 @@ fn run_mock_stream() {
             satellites: sats,
         };
 
-        on_message(timestamp, &msg);
+        if let Some(ref s) = sender {
+            let _ = s.send((timestamp, msg));
+        } else {
+            on_message(timestamp, &msg);
+        }
 
-        // Drift for next frame (simulate movement)
         lat += 0.0001;
         lon += 0.00008;
         course = (course + 2.0) % 360.0;
@@ -188,5 +227,91 @@ impl TtyAdapter {
         println!("Writing: {command}");
         self.port.write_all(command.as_bytes())?;
         Ok(())
+    }
+}
+
+// --- GUI (feature-gated) ---
+
+#[cfg(feature = "gui")]
+use eframe::egui;
+
+#[cfg(feature = "gui")]
+struct LoraGuiApp {
+    rx: std::sync::Mutex<std::sync::mpsc::Receiver<(f64, RadioMsg)>>,
+    messages: Vec<(f64, RadioMsg)>,
+}
+
+#[cfg(feature = "gui")]
+impl LoraGuiApp {
+    fn new(rx: std::sync::Mutex<std::sync::mpsc::Receiver<(f64, RadioMsg)>>) -> Self {
+        Self {
+            rx,
+            messages: Vec::new(),
+        }
+    }
+}
+
+#[cfg(feature = "gui")]
+impl eframe::App for LoraGuiApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let rx = self.rx.lock().unwrap();
+        while let Ok(pair) = rx.try_recv() {
+            self.messages.push(pair);
+            if self.messages.len() > MAX_GUI_MESSAGES {
+                self.messages.remove(0);
+            }
+        }
+        drop(rx);
+
+        egui::TopBottomPanel::top("telemetry").show(ctx, |ui| {
+            ui.heading("LoRa receiver");
+            if let Some((ts, msg)) = self.messages.last() {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(format!("Lat: {:.6}°", msg.latitude_degrees));
+                    ui.label(format!("Lon: {:.6}°", msg.longitude_degrees));
+                    ui.label(format!("Course: {:.1}°", msg.course_over_ground_degrees));
+                    ui.label(format!("Speed: {:.2} m/s", msg.speed_over_ground_meters_per_second));
+                    ui.label(format!("Alt: {:.1} m", msg.altitude_meters));
+                    ui.label(format!("Sats: {}", msg.satellites));
+                    ui.label(format!("Time: {:.1}", ts));
+                });
+            } else {
+                ui.label("Waiting for first message…");
+            }
+            ui.label(format!("Messages: {}", self.messages.len()));
+        });
+
+        egui::CentralPanel::default().show(ctx, |ui| {
+            if self.messages.is_empty() {
+                ui.label("No track data yet.");
+                return;
+            }
+
+            let points: Vec<[f64; 2]> = self
+                .messages
+                .iter()
+                .map(|(_, m)| [m.longitude_degrees, m.latitude_degrees])
+                .collect();
+
+            let plot = egui_plot::Plot::new("track")
+                .view_aspect(1.0)
+                .label_formatter(|_name, value| {
+                    format!("Lon: {:.4}° Lat: {:.4}°", value.x, value.y)
+                })
+                .include_x(points.iter().map(|p| p[0]).min_by(f64::total_cmp).unwrap_or(0.0) - 0.001)
+                .include_x(points.iter().map(|p| p[0]).max_by(f64::total_cmp).unwrap_or(0.0) + 0.001)
+                .include_y(points.iter().map(|p| p[1]).min_by(f64::total_cmp).unwrap_or(0.0) - 0.001)
+                .include_y(points.iter().map(|p| p[1]).max_by(f64::total_cmp).unwrap_or(0.0) + 0.001);
+
+            plot.show(ui, |plot_ui| {
+                plot_ui.points(
+                    egui_plot::Points::new(points)
+                        .radius(2.0)
+                        .color(egui::Color32::from_rgb(80, 180, 240)),
+                );
+            });
+        });
+
+        ctx.request_repaint();
     }
 }
