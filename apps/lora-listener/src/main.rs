@@ -1,20 +1,27 @@
 use std::io;
 use std::io::Read;
 use std::io::Write;
-use std::{error::Error, time::Duration};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{error::Error, thread};
 
 use common::RadioMsg;
 use serialport::SerialPort;
 
 fn main() -> Result<(), Box<dyn Error>> {
-    // Hardcoded key for testing (use LORA_ENCRYPTION_KEY env in production)
+    let mock = std::env::args().any(|a| a == "--mock" || a == "-m");
     let key: [u8; 32] = [0u8; 32];
+
+    if mock {
+        println!("Mock mode: generating fake RadioMsg stream (no serial). Ctrl+C to stop.");
+        run_mock_stream();
+        return Ok(());
+    }
 
     let ports = serialport::available_ports().expect("Failed to list serial ports");
     let port = ports.first().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::NotFound,
-            "No serial ports found. Plug in a LoRa serial device (e.g. USB-UART).",
+            "No serial ports found. Plug in a LoRa serial device (e.g. USB-UART). Use --mock for testing without hardware.",
         )
     })?;
 
@@ -37,11 +44,56 @@ fn main() -> Result<(), Box<dyn Error>> {
                 Err(e) => println!("Failed to parse data: {e}"),
                 Ok(msg) => {
                     if let Some((timestamp, msg)) = RadioMsg::decrypt(&msg, &key) {
-                        println!("{timestamp}: {msg:?}")
+                        on_message(timestamp, &msg);
                     }
                 }
             }
         };
+    }
+}
+
+/// Called for each decoded (timestamp, RadioMsg). Override here or later for GUI.
+fn on_message(timestamp: f64, msg: &RadioMsg) {
+    println!("{timestamp}: {msg:?}");
+}
+
+/// Generates a fake stream of RadioMsg for testing without hardware.
+/// Simulates a moving track: start position drifts slightly each message.
+fn run_mock_stream() {
+    let mut lat = 52.2297;   // Warsaw
+    let mut lon = 21.0122;
+    let mut course = 45.0;
+    let mut speed = 5.0;
+    let mut alt = 120.0;
+    let mut sats = 8u64;
+    let interval = Duration::from_secs(2);
+
+    loop {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+
+        let msg = RadioMsg {
+            latitude_degrees: lat,
+            longitude_degrees: lon,
+            course_over_ground_degrees: course,
+            speed_over_ground_meters_per_second: speed,
+            altitude_meters: alt,
+            satellites: sats,
+        };
+
+        on_message(timestamp, &msg);
+
+        // Drift for next frame (simulate movement)
+        lat += 0.0001;
+        lon += 0.00008;
+        course = (course + 2.0) % 360.0;
+        speed = 4.5 + (timestamp * 0.1).sin() * 0.5;
+        alt += 0.5;
+        sats = 7 + (timestamp as u64 % 3);
+
+        thread::sleep(interval);
     }
 }
 
